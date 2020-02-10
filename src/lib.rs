@@ -1,3 +1,5 @@
+#![feature(test)]
+
 use std::hash::{Hash, Hasher, BuildHasher};
 use std::collections::hash_map::{DefaultHasher, RandomState};
 use std::fmt::{Formatter, Error, Binary};
@@ -73,10 +75,9 @@ impl <Storage: AsRef<[u8]> + AsMut<[u8]>, H: Hasher + Clone> BloomFilter<Storage
     }
 
 
-    fn get_bit_indecies<'a, E: Hash>(&'a self, elmt: &'a E) -> Vec<usize> {
-        let store_slice: &[u8] = self.data.as_ref();
+    fn get_bit_indecies<E: Hash>(&self, elmt: & E) -> Vec<usize> {
 
-        let store_len = store_slice.len() * 8;
+        let store_len = self.data_len * 8;
 
         self.hashers.iter().map(|h| {
             let mut h: H = (*h).clone();
@@ -92,12 +93,13 @@ impl <Storage: AsRef<[u8]> + AsMut<[u8]>, H: Hasher + Clone> BloomFilter<Storage
     /// hash of the object changes, we don't know any more if it was added :(
     pub fn never_occured<E: Hash>(&self, elmt: &E) -> bool {
 
-        let mut el_mask = vec![0u8; self.data_len];
+        let store = self.data.as_ref();
 
-        crate::utils::set_multi_bitmask(&mut el_mask, &mut self.get_bit_indecies(elmt).iter());
 
-        for (b_mask_el, b_mask_store) in el_mask.iter().zip(self.data.as_ref().iter()) {
-            if *b_mask_el & *b_mask_store != *b_mask_el { return true; }
+
+        for (n, mask) in
+                self.get_bit_indecies(elmt).iter().map(|i| crate::utils::get_single_bit_mask(*i)) {
+            if store[n] & mask != mask { return true; }
         }
 
         false
@@ -107,14 +109,18 @@ impl <Storage: AsRef<[u8]> + AsMut<[u8]>, H: Hasher + Clone> BloomFilter<Storage
     /// Add a hashable Element to the BloomFilter.
     /// print
     pub fn add<E: Hash>(&mut self, elmt: &E) {
+        self.elmts_added += 1;
 
-        let mut el_mask = vec![0u8; self.data_len];
-
-        crate::utils::set_multi_bitmask(&mut el_mask, &mut self.get_bit_indecies(elmt).iter());
-
-        for (b_mask_el, b_mask_store) in el_mask.iter().zip(self.data.as_mut().iter_mut()) {
-            *b_mask_store |= *b_mask_el;
+        for (n, mask) in
+            self.get_bit_indecies(elmt).iter().map(|i| crate::utils::get_single_bit_mask(*i)) {
+            self.data.as_mut()[n] |= mask;
         }
+    }
+
+    pub fn err_probability(&self) -> f64 {
+        let fill_ratio = self.data.as_ref().iter().map(|e| e.count_ones()).sum::<u32>() as f64 / (self.data_len * 8) as f64;
+
+        fill_ratio.powi(self.hashers.len() as i32)
     }
 }
 
@@ -137,6 +143,9 @@ impl Binary for BloomFilter {
 mod tests {
     use crate::BloomFilter;
     use std::collections::hash_map::DefaultHasher;
+    use std::iter::once;
+    use std::collections::HashSet;
+    use self::test::Bencher;
 
     #[test]
     fn bit_mask_functions() {
@@ -155,21 +164,73 @@ mod tests {
     #[test]
     fn filter_test_basic() {
 
-        let mut filter = BloomFilter::default_with_settings(4, 4);
+        let mut filter = BloomFilter::default_with_settings(16, 4);
 
         // filter shouldn't fire any value
         assert!((0..100).all(|e| filter.never_occured(&e)));
 
         println!("{:b}", filter);
-
+        println!("ErrProb.: {}", filter.err_probability());
         filter.add(&2);
         filter.add(&4);
 
         println!("{:b}", filter);
+        println!("ErrProb.: {}", filter.err_probability());
         assert!(!filter.never_occured(&2));
         assert!(!filter.never_occured(&4));
 
         // this may fail if h(23) & (h(2) | h(4)) != 0 where h is the multi-bitmask
         assert!(filter.never_occured(&3334));
+
+        for i in (10..20) {
+            filter.add(&i);
+        }
+
+        println!("{:b}", filter);
+        println!("ErrProb.: {}", filter.err_probability());
+    }
+
+    extern crate test;
+
+    #[bench]
+    fn filter_find_double_filter_bench(b: &mut Bencher) {
+
+        b.iter(|| {
+            let mut data = (1..1000000).chain(once(2));
+
+            let mut filter = BloomFilter::default_with_settings(64, 4);
+            let mut set = HashSet::with_capacity(2000);
+
+            while let Some(n) = data.next() {
+                if (filter.never_occured(&n)) {
+                    filter.add(&n);
+                    set.insert(n);
+                    continue;
+                }
+
+                if set.contains(&n) {
+                    println!("first double: {}", n);
+                    break;
+                }
+                set.insert(n);
+            }
+        })
+    }
+
+    #[bench]
+    fn filter_find_double_nofilter_bench(b: &mut Bencher) {
+        b.iter(|| {
+            let mut data = (1..1000000).chain(once(2));
+
+            let mut set = HashSet::with_capacity(2000);
+
+            while let Some(n) = data.next() {
+                if set.contains(&n) {
+                    println!("first double: {}", n);
+                    break;
+                }
+                set.insert(n);
+            }
+        })
     }
 }
